@@ -169,11 +169,52 @@ module test_bench;
         dii_data_size = 0;
         cii_K = 0;
         
-        #100
+        // SECOND FRAME
+        #100        
         rst = 1;
 	    #10
 	    rst = 0;
-	    #10
+        #10
+        cii_ctl_vld = 1'b1;
+        // Put 128 bit Key onto cii_K bus
+        cii_K       = 128'h3881e7be1bb3bbcaff20bdb78e5d1b67;
+        
+        #10
+        cii_ctl_vld = 1'b0;
+        
+        cii_IV_vld = 1'b1;
+        // Put IV onto dii_data bus
+        dii_data   = 128'hdcf5b7ae2d7552e2297fcfa9_00000001;
+        
+       
+        #250
+        cii_IV_vld = 1'b0;
+
+        // Put AAD onto dii_data bus
+        dii_data_vld = 1'b1;
+        dii_data_type = 1'b1;
+        dii_data_size = 4'd4;
+        dii_data      = 128'hc60c64bbf7;
+        
+        #10
+        dii_data_vld = 1'b0;
+        
+        #80
+        //Put Ciphertext onto dii_data bus
+        dii_last_word = 1'b1;
+        dii_data_vld  = 1'b1;
+        dii_data_type = 1'b0; 
+        dii_data_size = 4'd4; 
+        dii_data      = 128'h5626f96ecb;
+        
+        #10
+        dii_data_vld  = 1'b0;
+        
+
+        #310
+        dii_last_word = 0;
+        dii_data_size = 0;
+        cii_K = 0;
         $finish();
 
 	  end
