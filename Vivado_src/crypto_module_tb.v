@@ -77,7 +77,7 @@ module crypto_module_tb(
     S_AXIS_TDATA = 128'h4df64bff1fa11895af337eb66b66e129;
     S_AXIS_TVALID = 1;
     
-    #380
+    #390
     S_AXIS_TLAST = 1;
     S_AXIS_TDATA = 128'h1fda3cf888;
     
@@ -101,7 +101,7 @@ module crypto_module_tb(
     S_AXIS_TDATA = 128'h1c6113d81c8e6421435aa83dd23af5f9;
     S_AXIS_TVALID = 1;
     
-    #380
+    #390
     S_AXIS_TDATA = 128'ha2e75920cf12ae439445e1826ff39469;
     
     #240

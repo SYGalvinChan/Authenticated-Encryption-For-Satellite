@@ -107,6 +107,7 @@ module crypto_module(
 
 	
 	reg [DATA_WIDTH-1:0] aad = 0;
+	reg [DATA_WIDTH-1:0] key = 0;
 	/*
 	always @(posedge clk) 
 	begin
@@ -203,8 +204,7 @@ module crypto_module(
             S_AXIS_TREADY 	<= 1;
             if (S_AXIS_TVALID == 1 && S_AXIS_TREADY == 1)
             begin
-                cii_K <= S_AXIS_TDATA;
-                cii_ctl_vld <= 1'b1;
+                key <= S_AXIS_TDATA;
                 state <= READ_CRYPTO_HEADER;
             end
         end
@@ -213,8 +213,11 @@ module crypto_module(
         begin
             if (S_AXIS_TVALID == 1 && S_AXIS_TREADY == 1)
             begin
+                // Send Key into GCM Encrypt module
+                cii_K <= key;
+                cii_ctl_vld <= 1'b1;
+                // Send IV into GCM Encrypt module
                 dii_data <= S_AXIS_TDATA;
-                cii_ctl_vld <= 1'b0;
                 cii_IV_vld <= 1'b1;
                 S_AXIS_TREADY <= 0;
                 aad[95:0] <= S_AXIS_TDATA[127:32];
@@ -337,6 +340,7 @@ module crypto_module(
             end
             else
             begin
+                cii_ctl_vld <= 1'b0;
                 dii_data_vld <= 1'b0;
                 S_AXIS_TREADY <= 0;
                 M_AXIS_TVALID <= 0;

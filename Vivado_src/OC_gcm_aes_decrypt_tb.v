@@ -98,13 +98,16 @@ module test_bench;
 	    cii_ctl_vld = 1'b1;
         // Put 128 bit Key onto cii_K bus
         cii_K       = 128'hfeffe9928665731c6d6a8f9467308308;
+        cii_IV_vld = 1'b1;
+        // Put IV onto dii_data bus
+        dii_data   = 128'hcafebabefacedbaddecaf888_00000001;
         
         #10
         cii_ctl_vld = 1'b0;
         
-        cii_IV_vld = 1'b1;
-        // Put IV onto dii_data bus
-        dii_data   = 128'hcafebabefacedbaddecaf888_00000001;
+//        cii_IV_vld = 1'b1;
+//        // Put IV onto dii_data bus
+//        dii_data   = 128'hcafebabefacedbaddecaf888_00000001;
         
        
         #250
