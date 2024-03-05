@@ -62,7 +62,7 @@ module crypto_module_tb(
     #10
     rst_n = 1;
     
-    #20
+    #40
     // SEND KEY
     S_AXIS_TDATA = 128'hee84e19cda87a76291eaaf2054aef812;
     S_AXIS_TVALID = 1;
@@ -86,7 +86,7 @@ module crypto_module_tb(
     S_AXIS_TVALID = 0;
     
     #400
-    #20
+    #100
     // SEND KEY
     S_AXIS_TDATA = 128'ha3557da8c75e9dfde2ff0bd90d0156f8;
     S_AXIS_TVALID = 1;

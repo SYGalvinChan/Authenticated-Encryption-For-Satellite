@@ -37,57 +37,105 @@ module crypto_module(
     );
     
     localparam DATA_WIDTH = 128;
+    
     input clk;
     input rst_n;
-    // slave in interface
-	output	reg				S_AXIS_TREADY;  // Ready to accept data in
+    
+    // AXI Stream interface signals
+    
+    // Slave in interface
+	output	reg				        S_AXIS_TREADY;  // Ready to accept data in
 	input	[DATA_WIDTH - 1: 0]		S_AXIS_TDATA;   // Data in
-	input					S_AXIS_TLAST;   // Optional data in qualifier
-	input					S_AXIS_TVALID;  // Data in is valid
-	// master out interface
-	output	reg				M_AXIS_TVALID;  // Data out is valid
+	input					        S_AXIS_TLAST;   // Optional data in qualifier
+	input					        S_AXIS_TVALID;  // Data in is valid
+	// Master out interface
+	output	reg				        M_AXIS_TVALID;  // Data out is valid
 	output	reg [DATA_WIDTH - 1: 0]	M_AXIS_TDATA;   // Data Out
-	output	reg				M_AXIS_TLAST;   // Optional data out qualifier
-	input					M_AXIS_TREADY;  // Connected slave device is ready to accept data out
+	output	reg				        M_AXIS_TLAST;   // Optional data out qualifier
+	input					        M_AXIS_TREADY;  // Connected slave device is ready to accept data out
     
-    reg rst;
-    reg [DATA_WIDTH-1:0] dii_data = 0;
-    reg [3:0]       dii_data_size = 0;
-    reg             dii_data_vld = 0;
-    reg             dii_data_type = 0;
-    reg             dii_last_word = 0;
+    // Inputs and outputs for GMC Encrypt module
     
-    reg [DATA_WIDTH-1:0] cii_K = 0;
-    reg             cii_ctl_vld = 0;
-    reg             cii_IV_vld = 0;
+    // Inputs
+    reg                  encrypt_rst;
+    reg [DATA_WIDTH-1:0] encrypt_dii_data = 0;
+    reg [3:0]            encrypt_dii_data_size = 0;
+    reg                  encrypt_dii_data_vld = 0;
+    reg                  encrypt_dii_data_type = 0;
+    reg                  encrypt_dii_last_word = 0;
     
+    reg [DATA_WIDTH-1:0] encrypt_cii_K = 0;
+    reg                  encrypt_cii_ctl_vld = 0;
+    reg                  encrypt_cii_IV_vld = 0;
     
     // Outputs
-    wire                  dii_data_not_ready;
-    wire [DATA_WIDTH-1:0]      Out_data;
-    wire                  Out_vld;
-    wire                  Tag_vld;
-    wire [3:0]            Out_data_size;
-    wire                  Out_last_word;
+    wire                  encrypt_dii_data_not_ready;
+    wire [DATA_WIDTH-1:0] encrypt_Out_data;
+    wire                  encrypt_Out_vld;
+    wire                  encrypt_Tag_vld;
+    wire [3:0]            encrypt_Out_data_size;
+    wire                  encrypt_Out_last_word;
     
-    gcm_aes_v0 yey (
+    gcm_aes_v0 GCM_ENCRYPT (
         .clk(clk), 
-        .rst(rst), 
-        .dii_data(dii_data), 
-        .dii_data_size(dii_data_size),
-        .dii_data_vld(dii_data_vld), 
-        .dii_data_type(dii_data_type), 
-        .dii_data_not_ready(dii_data_not_ready), 
-        .dii_last_word(dii_last_word),
-        .cii_K(cii_K),
-        .cii_ctl_vld(cii_ctl_vld), 
-        .cii_IV_vld(cii_IV_vld), 
-        .Out_data(Out_data), 
-        .Out_vld(Out_vld), 
-        .Tag_vld(Tag_vld),
-        .Out_data_size(Out_data_size),
-        .Out_last_word(Out_last_word)
+        .rst(encrypt_rst), 
+        .dii_data(encrypt_dii_data), 
+        .dii_data_size(encrypt_dii_data_size),
+        .dii_data_vld(encrypt_dii_data_vld), 
+        .dii_data_type(encrypt_dii_data_type), 
+        .dii_data_not_ready(encrypt_dii_data_not_ready), 
+        .dii_last_word(encrypt_dii_last_word),
+        .cii_K(encrypt_cii_K),
+        .cii_ctl_vld(encrypt_cii_ctl_vld), 
+        .cii_IV_vld(encrypt_cii_IV_vld), 
+        .Out_data(encrypt_Out_data), 
+        .Out_vld(encrypt_Out_vld), 
+        .Tag_vld(encrypt_Tag_vld),
+        .Out_data_size(encrypt_Out_data_size),
+        .Out_last_word(encrypt_Out_last_word)
     );
+    /*
+    // Inputs and outputs for GMC decrypt module
+    
+    // Inputs
+    reg                  decrypt_rst;
+    reg [DATA_WIDTH-1:0] decrypt_dii_data = 0;
+    reg [3:0]            decrypt_dii_data_size = 0;
+    reg                  decrypt_dii_data_vld = 0;
+    reg                  decrypt_dii_data_type = 0;
+    reg                  decrypt_dii_last_word = 0;
+    
+    reg [DATA_WIDTH-1:0] decrypt_cii_K = 0;
+    reg                  decrypt_cii_ctl_vld = 0;
+    reg                  decrypt_cii_IV_vld = 0;
+    
+    // Outputs
+    wire                  decrypt_dii_data_not_ready;
+    wire [DATA_WIDTH-1:0] decrypt_Out_data;
+    wire                  decrypt_Out_vld;
+    wire                  decrypt_Tag_vld;
+    wire [3:0]            decrypt_Out_data_size;
+    wire                  decrypt_Out_last_word;
+    
+    gcm_aes_v0_decrypt GCM_DECRYPT (
+        .clk(clk), 
+        .rst(decrypt_rst), 
+        .dii_data(decrypt_dii_data), 
+        .dii_data_size(decrypt_dii_data_size),
+        .dii_data_vld(decrypt_dii_data_vld), 
+        .dii_data_type(decrypt_dii_data_type), 
+        .dii_data_not_ready(decrypt_dii_data_not_ready), 
+        .dii_last_word(decrypt_dii_last_word),
+        .cii_K(decrypt_cii_K),
+        .cii_ctl_vld(decrypt_cii_ctl_vld), 
+        .cii_IV_vld(decrypt_cii_IV_vld), 
+        .Out_data(decrypt_Out_data), 
+        .Out_vld(decrypt_Out_vld), 
+        .Tag_vld(decrypt_Tag_vld),
+        .Out_data_size(decrypt_Out_data_size),
+        .Out_last_word(decrypt_Out_last_word)
+    );
+    */
     
     // Define the states of state machine (one hot encoding)
 	localparam IDLE  = 4'd0;
@@ -105,78 +153,15 @@ module crypto_module(
     reg last_block = 0;
     reg [3:0] last_block_size = 0;
 
-	
 	reg [DATA_WIDTH-1:0] aad = 0;
 	reg [DATA_WIDTH-1:0] key = 0;
-	/*
-	always @(posedge clk) 
-	begin
-	   if (!rst_n)
-	   begin
-	   rst  <= 1;
-	   state <= IDLE;
-	   end
-	end
 	
-	always @(posedge clk) 
-	begin
-        if (state == COMPUTE)    
-        begin
-            dii_data_vld <= 1'b0;
-            S_AXIS_TREADY <= 0;
-            M_AXIS_TVALID <= 0;
-            
-            if(data_vld_reseted)
-            begin
-                case(next_state)
-                
-                WRITE_AAD:
-                begin
-                    if (!dii_data_not_ready)
-                    begin
-                        state <= WRITE_AAD;
-                    end
-                end
-                
-                READ_PLAINTEXT:
-                begin
-                    if (!dii_data_not_ready)
-                    begin
-                        state <= READ_PLAINTEXT;
-                        S_AXIS_TREADY 	<= 1; 
-                    end
-                end
-                
-                WRITE_CIPHERTEXT:
-                begin
-                    if (Out_vld)
-                    begin
-                        state <= WRITE_CIPHERTEXT;
-                    end
-                end
-    
-                WRITE_TAG:
-                begin
-                    if (Tag_vld)
-                    begin
-                        state <= WRITE_TAG;
-                    end
-                end
-                endcase
-            end
-            else
-            begin
-                data_vld_reseted <= 1;
-            end
-        end
-    end
-    */
 	
     always @(posedge clk) 
     begin 
     if (!rst_n)
     begin
-        rst  <= 1;
+        encrypt_rst  <= 1;
         state <= IDLE;
     end
     else
@@ -188,10 +173,12 @@ module crypto_module(
             S_AXIS_TREADY 	<= 0;
             M_AXIS_TVALID 	<= 0;
             M_AXIS_TLAST  	<= 0;
-            rst = 0;
-            data_vld_reseted = 0;
-            last_block = 0;
-            dii_last_word = 0;
+            
+            aad <= 0;
+            encrypt_rst <= 0;
+            data_vld_reseted <= 0;
+            last_block <= 0;
+            encrypt_dii_last_word <= 0;
             if (S_AXIS_TVALID == 1)
             begin
                 state           <= READ_KEY;
@@ -214,11 +201,11 @@ module crypto_module(
             if (S_AXIS_TVALID == 1 && S_AXIS_TREADY == 1)
             begin
                 // Send Key into GCM Encrypt module
-                cii_K <= key;
-                cii_ctl_vld <= 1'b1;
+                encrypt_cii_K <= key;
+                encrypt_cii_ctl_vld <= 1'b1;
                 // Send IV into GCM Encrypt module
-                dii_data <= S_AXIS_TDATA;
-                cii_IV_vld <= 1'b1;
+                encrypt_dii_data <= S_AXIS_TDATA;
+                encrypt_cii_IV_vld <= 1'b1;
                 S_AXIS_TREADY <= 0;
                 aad[95:0] <= S_AXIS_TDATA[127:32];
                 last_block_size <= S_AXIS_TDATA[111:96];
@@ -229,11 +216,11 @@ module crypto_module(
 
         WRITE_AAD:
         begin
-            cii_IV_vld = 1'b0;
-            dii_data_vld = 1'b1;
-            dii_data_type = 1'b1;
-            dii_data_size = 4'd15;
-            dii_data <= aad;
+            encrypt_cii_IV_vld <= 1'b0;
+            encrypt_dii_data_vld <= 1'b1;
+            encrypt_dii_data_type <= 1'b1;
+            encrypt_dii_data_size <= 4'd15;
+            encrypt_dii_data <= {32'h0, aad};
             data_vld_reseted <= 0;
             state <= COMPUTE;
             next_state <= READ_PLAINTEXT;
@@ -243,18 +230,18 @@ module crypto_module(
         begin
             if (S_AXIS_TVALID == 1 && S_AXIS_TREADY == 1)
             begin
-                dii_data <= S_AXIS_TDATA;
-                dii_data_vld = 1'b1;
-                dii_data_type = 1'b0;
+                encrypt_dii_data <= S_AXIS_TDATA;
+                encrypt_dii_data_vld <= 1'b1;
+                encrypt_dii_data_type <= 1'b0;
                 if (S_AXIS_TLAST)
                 begin
-                    dii_data_size = last_block_size - 1;
-                    last_block = 1;
-                    dii_last_word = 1;
+                    encrypt_dii_data_size <= last_block_size - 1;
+                    last_block <= 1;
+                    encrypt_dii_last_word <= 1;
                 end
                 else
                 begin
-                    dii_data_size = 4'd15;
+                    encrypt_dii_data_size <= 4'd15;
                 end
                 
                 S_AXIS_TREADY <= 0;
@@ -266,7 +253,7 @@ module crypto_module(
         
         WRITE_CIPHERTEXT:
         begin
-            M_AXIS_TDATA <= Out_data;
+            M_AXIS_TDATA <= encrypt_Out_data;
             M_AXIS_TVALID <= 1;
             if (M_AXIS_TREADY == 1 && M_AXIS_TVALID == 1)
             begin 
@@ -286,10 +273,10 @@ module crypto_module(
         
         WRITE_TAG:
         begin
-            M_AXIS_TDATA <= Out_data;
+            M_AXIS_TDATA <= encrypt_Out_data;
             M_AXIS_TVALID <= 1;
             M_AXIS_TLAST <= 1;
-            rst = 1;
+            encrypt_rst = 1;
             if (M_AXIS_TREADY == 1 && M_AXIS_TVALID == 1)
             begin 
                 M_AXIS_TVALID <= 0;
@@ -306,7 +293,7 @@ module crypto_module(
                 
                 WRITE_AAD:
                 begin
-                    if (!dii_data_not_ready)
+                    if (!encrypt_dii_data_not_ready)
                     begin
                         state <= WRITE_AAD;
                     end
@@ -314,7 +301,7 @@ module crypto_module(
                 
                 READ_PLAINTEXT:
                 begin
-                    if (!dii_data_not_ready)
+                    if (!encrypt_dii_data_not_ready)
                     begin
                         state <= READ_PLAINTEXT;
                         S_AXIS_TREADY 	<= 1; 
@@ -323,7 +310,7 @@ module crypto_module(
                 
                 WRITE_CIPHERTEXT:
                 begin
-                    if (Out_vld)
+                    if (encrypt_Out_vld)
                     begin
                         state <= WRITE_CIPHERTEXT;
                     end
@@ -331,7 +318,7 @@ module crypto_module(
     
                 WRITE_TAG:
                 begin
-                    if (Tag_vld)
+                    if (encrypt_Tag_vld)
                     begin
                         state <= WRITE_TAG;
                     end
@@ -340,8 +327,8 @@ module crypto_module(
             end
             else
             begin
-                cii_ctl_vld <= 1'b0;
-                dii_data_vld <= 1'b0;
+                encrypt_cii_ctl_vld <= 1'b0;
+                encrypt_dii_data_vld <= 1'b0;
                 S_AXIS_TREADY <= 0;
                 M_AXIS_TVALID <= 0;
                 data_vld_reseted <= 1;
