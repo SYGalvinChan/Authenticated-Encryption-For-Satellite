@@ -94,7 +94,7 @@ module crypto_module(
         .Out_data_size(encrypt_Out_data_size),
         .Out_last_word(encrypt_Out_last_word)
     );
-    /*
+    
     // Inputs and outputs for GMC decrypt module
     
     // Inputs
@@ -135,15 +135,14 @@ module crypto_module(
         .Out_data_size(decrypt_Out_data_size),
         .Out_last_word(decrypt_Out_last_word)
     );
-    */
     
     // Define the states of state machine (one hot encoding)
 	localparam IDLE  = 4'd0;
 	localparam READ_KEY = 4'd1;
 	localparam READ_CRYPTO_HEADER = 4'd2;
 	localparam WRITE_AAD = 4'd3;
-	localparam READ_PLAINTEXT = 4'd4;
-	localparam WRITE_CIPHERTEXT  = 4'd5;
+	localparam READ_BLOCK = 4'd4;
+	localparam WRITE_BLOCK  = 4'd5;
 	localparam WRITE_TAG = 4'd6;
 	localparam COMPUTE = 4'd7;
 
@@ -152,6 +151,7 @@ module crypto_module(
     reg data_vld_reseted = 0;
     reg last_block = 0;
     reg [3:0] last_block_size = 0;
+    reg is_encrypt;
 
 	reg [DATA_WIDTH-1:0] aad = 0;
 	reg [DATA_WIDTH-1:0] key = 0;
@@ -159,184 +159,297 @@ module crypto_module(
 	
     always @(posedge clk) 
     begin 
-    if (!rst_n)
-    begin
-        encrypt_rst  <= 1;
-        state <= IDLE;
-    end
-    else
-    begin
-        case (state)
-    
-        IDLE:
+        if (!rst_n)
         begin
-            S_AXIS_TREADY 	<= 0;
-            M_AXIS_TVALID 	<= 0;
-            M_AXIS_TLAST  	<= 0;
+            encrypt_rst  <= 1;
+            decrypt_rst  <= 1;
+            state <= IDLE;
+        end
+        else
+        begin
+            case (state)
+        
+            IDLE:
+            begin
+                S_AXIS_TREADY 	<= 0;
+                M_AXIS_TVALID 	<= 0;
+                M_AXIS_TLAST  	<= 0;
+                
+                aad <= 0;
+                encrypt_rst  <= 0;
+                decrypt_rst  <= 0;
+                data_vld_reseted <= 0;
+                last_block <= 0;
+                encrypt_dii_last_word <= 0;
+                decrypt_dii_last_word <= 0;
+                if (S_AXIS_TVALID == 1)
+                begin
+                    state           <= READ_KEY;
+                    S_AXIS_TREADY 	<= 1; 
+                end
+            end
             
-            aad <= 0;
-            encrypt_rst <= 0;
-            data_vld_reseted <= 0;
-            last_block <= 0;
-            encrypt_dii_last_word <= 0;
-            if (S_AXIS_TVALID == 1)
+            READ_KEY:
             begin
-                state           <= READ_KEY;
-                S_AXIS_TREADY 	<= 1; 
-            end
-        end
-        
-        READ_KEY:
-        begin
-            S_AXIS_TREADY 	<= 1;
-            if (S_AXIS_TVALID == 1 && S_AXIS_TREADY == 1)
-            begin
-                key <= S_AXIS_TDATA;
-                state <= READ_CRYPTO_HEADER;
-            end
-        end
-        
-        READ_CRYPTO_HEADER:
-        begin
-            if (S_AXIS_TVALID == 1 && S_AXIS_TREADY == 1)
-            begin
-                // Send Key into GCM Encrypt module
-                encrypt_cii_K <= key;
-                encrypt_cii_ctl_vld <= 1'b1;
-                // Send IV into GCM Encrypt module
-                encrypt_dii_data <= S_AXIS_TDATA;
-                encrypt_cii_IV_vld <= 1'b1;
-                S_AXIS_TREADY <= 0;
-                aad[95:0] <= S_AXIS_TDATA[127:32];
-                last_block_size <= S_AXIS_TDATA[111:96];
-                state <= COMPUTE;
-                next_state <= WRITE_AAD;
-            end
-        end
-
-        WRITE_AAD:
-        begin
-            encrypt_cii_IV_vld <= 1'b0;
-            encrypt_dii_data_vld <= 1'b1;
-            encrypt_dii_data_type <= 1'b1;
-            encrypt_dii_data_size <= 4'd15;
-            encrypt_dii_data <= {32'h0, aad};
-            data_vld_reseted <= 0;
-            state <= COMPUTE;
-            next_state <= READ_PLAINTEXT;
-        end
-        
-        READ_PLAINTEXT:
-        begin
-            if (S_AXIS_TVALID == 1 && S_AXIS_TREADY == 1)
-            begin
-                encrypt_dii_data <= S_AXIS_TDATA;
-                encrypt_dii_data_vld <= 1'b1;
-                encrypt_dii_data_type <= 1'b0;
-                if (S_AXIS_TLAST)
+                S_AXIS_TREADY 	<= 1;
+                if (S_AXIS_TVALID == 1 && S_AXIS_TREADY == 1)
                 begin
-                    encrypt_dii_data_size <= last_block_size - 1;
-                    last_block <= 1;
-                    encrypt_dii_last_word <= 1;
-                end
-                else
-                begin
-                    encrypt_dii_data_size <= 4'd15;
-                end
-                
-                S_AXIS_TREADY <= 0;
-                data_vld_reseted <= 0;
-                state <= COMPUTE;
-                next_state <= WRITE_CIPHERTEXT;
-            end
-        end
-        
-        WRITE_CIPHERTEXT:
-        begin
-            M_AXIS_TDATA <= encrypt_Out_data;
-            M_AXIS_TVALID <= 1;
-            if (M_AXIS_TREADY == 1 && M_AXIS_TVALID == 1)
-            begin 
-                M_AXIS_TVALID <= 0;
-                data_vld_reseted <= 0;
-                state <= COMPUTE;
-                if (last_block)
-                begin
-                    next_state <= WRITE_TAG;
-                end
-                else
-                begin
-                    next_state <= READ_PLAINTEXT;
+                    key <= S_AXIS_TDATA;
+                    state <= READ_CRYPTO_HEADER;
                 end
             end
-        end
-        
-        WRITE_TAG:
-        begin
-            M_AXIS_TDATA <= encrypt_Out_data;
-            M_AXIS_TVALID <= 1;
-            M_AXIS_TLAST <= 1;
-            encrypt_rst = 1;
-            if (M_AXIS_TREADY == 1 && M_AXIS_TVALID == 1)
-            begin 
-                M_AXIS_TVALID <= 0;
-                M_AXIS_TLAST <= 0;
-               state <= IDLE;
-            end
-        end
-        
-        COMPUTE:
-        begin
-            if(data_vld_reseted)
+            
+            READ_CRYPTO_HEADER:
             begin
-                case(next_state)
-                
-                WRITE_AAD:
+                if (S_AXIS_TVALID == 1 && S_AXIS_TREADY == 1)
                 begin
-                    if (!encrypt_dii_data_not_ready)
+                    if (S_AXIS_TDATA[31:0] == 32'h00000001)
                     begin
-                        state <= WRITE_AAD;
+                        is_encrypt <= 1;
+                        // Send Key into GCM Encrypt module
+                        encrypt_cii_K <= key;
+                        encrypt_cii_ctl_vld <= 1'b1;
+                        // Send IV into GCM Encrypt module
+                        encrypt_dii_data <= {S_AXIS_TDATA[127:32], 32'h00000001};
+                        encrypt_cii_IV_vld <= 1'b1;
                     end
-                end
-                
-                READ_PLAINTEXT:
-                begin
-                    if (!encrypt_dii_data_not_ready)
+                    else
                     begin
-                        state <= READ_PLAINTEXT;
-                        S_AXIS_TREADY 	<= 1; 
+                        is_encrypt <= 0;
+                        // Send Key into GCM Decrypt module
+                        decrypt_cii_K <= key;
+                        decrypt_cii_ctl_vld <= 1'b1;
+                        // Send IV into GCM Decrypt module
+                        decrypt_dii_data <= {S_AXIS_TDATA[127:32], 32'h00000001};
+                        decrypt_cii_IV_vld <= 1'b1;
                     end
+                    
+                    S_AXIS_TREADY <= 0;
+                    aad[95:0] <= S_AXIS_TDATA[127:32];
+                    last_block_size <= S_AXIS_TDATA[111:96];
+                    state <= COMPUTE;
+                    next_state <= WRITE_AAD;
                 end
-                
-                WRITE_CIPHERTEXT:
-                begin
-                    if (encrypt_Out_vld)
-                    begin
-                        state <= WRITE_CIPHERTEXT;
-                    end
-                end
+            end
     
-                WRITE_TAG:
+            WRITE_AAD:
+            begin
+                if (is_encrypt)
                 begin
-                    if (encrypt_Tag_vld)
+                    encrypt_cii_IV_vld <= 1'b0;
+                    encrypt_dii_data_vld <= 1'b1;
+                    encrypt_dii_data_type <= 1'b1;
+                    encrypt_dii_data_size <= 4'd15;
+                    encrypt_dii_data <= {32'h0, aad};
+                end
+                else
+                begin
+                    decrypt_cii_IV_vld <= 1'b0;
+                    decrypt_dii_data_vld <= 1'b1;
+                    decrypt_dii_data_type <= 1'b1;
+                    decrypt_dii_data_size <= 4'd15;
+                    decrypt_dii_data <= {32'h0, aad};
+                end
+                data_vld_reseted <= 0;
+                state <= COMPUTE;
+                next_state <= READ_BLOCK;
+            end
+            
+            READ_BLOCK:
+            begin
+                if (S_AXIS_TVALID == 1 && S_AXIS_TREADY == 1)
+                begin
+                    if (is_encrypt)
                     begin
-                        state <= WRITE_TAG;
+                        encrypt_dii_data <= S_AXIS_TDATA;
+                        encrypt_dii_data_vld <= 1'b1;
+                        encrypt_dii_data_type <= 1'b0;
+                        if (S_AXIS_TLAST)
+                        begin
+                            encrypt_dii_data_size <= last_block_size - 1;
+                            last_block <= 1;
+                            encrypt_dii_last_word <= 1;
+                        end
+                        else
+                        begin
+                            encrypt_dii_data_size <= 4'd15;
+                        end
+                    end
+                    else
+                    begin
+                        decrypt_dii_data <= S_AXIS_TDATA;
+                        decrypt_dii_data_vld <= 1'b1;
+                        decrypt_dii_data_type <= 1'b0;
+                        if (S_AXIS_TLAST)
+                        begin
+                            decrypt_dii_data_size <= last_block_size - 1;
+                            last_block <= 1;
+                            decrypt_dii_last_word <= 1;
+                        end
+                        else
+                        begin
+                            decrypt_dii_data_size <= 4'd15;
+                        end
+                    end
+                    S_AXIS_TREADY <= 0;
+                    data_vld_reseted <= 0;
+                    state <= COMPUTE;
+                    next_state <= WRITE_BLOCK;
+                end
+            end
+            
+            WRITE_BLOCK:
+            begin
+                if (is_encrypt)
+                begin
+                    M_AXIS_TDATA <= encrypt_Out_data;
+                end
+                else
+                begin
+                    M_AXIS_TDATA <= decrypt_Out_data;
+                end
+                M_AXIS_TVALID <= 1;
+                if (M_AXIS_TREADY == 1 && M_AXIS_TVALID == 1)
+                begin 
+                    M_AXIS_TVALID <= 0;
+                    data_vld_reseted <= 0;
+                    state <= COMPUTE;
+                    if (last_block)
+                    begin
+                        next_state <= WRITE_TAG;
+                    end
+                    else
+                    begin
+                        next_state <= READ_BLOCK;
                     end
                 end
-                endcase
             end
-            else
+            
+            WRITE_TAG:
             begin
-                encrypt_cii_ctl_vld <= 1'b0;
-                encrypt_dii_data_vld <= 1'b0;
-                S_AXIS_TREADY <= 0;
-                M_AXIS_TVALID <= 0;
-                data_vld_reseted <= 1;
+                if (is_encrypt)
+                begin
+                    M_AXIS_TDATA <= encrypt_Out_data;
+                    encrypt_rst <= 1;
+                end
+                else
+                begin
+                    M_AXIS_TDATA <= decrypt_Out_data;
+                    decrypt_rst <= 1;
+                end
+                M_AXIS_TVALID <= 1;
+                M_AXIS_TLAST <= 1;
+                if (M_AXIS_TREADY == 1 && M_AXIS_TVALID == 1)
+                begin 
+                    M_AXIS_TVALID <= 0;
+                    M_AXIS_TLAST <= 0;
+                   state <= IDLE;
+                end
             end
+            
+            COMPUTE:
+            begin
+                if (is_encrypt)
+                begin
+                    if(data_vld_reseted)
+                    begin                    
+                        case(next_state)
+                        
+                        WRITE_AAD:
+                        begin
+                            if (!encrypt_dii_data_not_ready)
+                            begin
+                                state <= WRITE_AAD;
+                            end
+                        end
+                        
+                        READ_BLOCK:
+                        begin
+                            if (!encrypt_dii_data_not_ready)
+                            begin
+                                state <= READ_BLOCK;
+                                S_AXIS_TREADY 	<= 1; 
+                            end
+                        end
+                        
+                        WRITE_BLOCK:
+                        begin
+                            if (encrypt_Out_vld)
+                            begin
+                                state <= WRITE_BLOCK;
+                            end
+                        end
+            
+                        WRITE_TAG:
+                        begin
+                            if (encrypt_Tag_vld)
+                            begin
+                                state <= WRITE_TAG;
+                            end
+                        end
+                        endcase
+                    end
+                    else
+                    begin
+                        encrypt_cii_ctl_vld <= 1'b0;
+                        encrypt_dii_data_vld <= 1'b0;
+                        S_AXIS_TREADY <= 0;
+                        M_AXIS_TVALID <= 0;
+                        data_vld_reseted <= 1;
+                    end
+                end
+                else
+                begin
+                    if(data_vld_reseted)
+                    begin                    
+                        case(next_state)
+                        
+                        WRITE_AAD:
+                        begin
+                            if (!decrypt_dii_data_not_ready)
+                            begin
+                                state <= WRITE_AAD;
+                            end
+                        end
+                        
+                        READ_BLOCK:
+                        begin
+                            if (!decrypt_dii_data_not_ready)
+                            begin
+                                state <= READ_BLOCK;
+                                S_AXIS_TREADY 	<= 1; 
+                            end
+                        end
+                        
+                        WRITE_BLOCK:
+                        begin
+                            if (decrypt_Out_vld)
+                            begin
+                                state <= WRITE_BLOCK;
+                            end
+                        end
+            
+                        WRITE_TAG:
+                        begin
+                            if (decrypt_Tag_vld)
+                            begin
+                                state <= WRITE_TAG;
+                            end
+                        end
+                        endcase
+                    end
+                    else
+                    begin
+                        decrypt_cii_ctl_vld <= 1'b0;
+                        decrypt_dii_data_vld <= 1'b0;
+                        S_AXIS_TREADY <= 0;
+                        M_AXIS_TVALID <= 0;
+                        data_vld_reseted <= 1;
+                    end
+                end
+            end
+            endcase
         end
-    endcase
-    end
     end
     
 endmodule
-
