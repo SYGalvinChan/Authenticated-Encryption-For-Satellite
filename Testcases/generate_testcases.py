@@ -12,6 +12,10 @@ def main():
     min_payload_length = 1
     max_payload_length = 100
 
+    seed = 1
+
+    random.seed(seed)
+
     testcases_json = []
     testcases_c_code = []
     testcases_text = []
