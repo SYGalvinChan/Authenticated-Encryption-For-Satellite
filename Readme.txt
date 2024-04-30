@@ -1,0 +1,27 @@
+- Open Vivado
+- Add design sources (Add all files in Vivaodo_src folder except those that end with _tb)
+- Create Block Design
+- Add Zynq7 Processing System 
+  - Go to PS-PL Configuration in the Page Navigator, expand HP Slave AXI Interface and select S AXI HP0 Interface
+  - Go to Interrupts in the Page Navigator, expand Fabric Interrupts, expand PL-PS Interrupt Ports, select IRQ_F2P[15:0]
+- Add AXI DMA IP
+  - Uncheck Enable Scatter Gather Engine
+  - Uncheck Enable Micro DMA
+  - Set Width of Buffer Length Register to 20 bits
+  - Set Stream Data Width of Read Channel to 128
+  - Set Stream Data Width of Write Channel to 128 (need set it to manual first)
+- Add Concat IP
+- Drag crypto_module from design sources into Block Design
+- Perform all the connection automation
+- Connect S_AXIS of crypto_module to M_AXIS_MM2S of AXI DMA IP
+- Connect M_AXIS of crypto_module to S_AXIS_S2MM of AXI DMA IP
+- Connect mm2s_introut and s2mm_introut of AXI DMA IP to in0 and in1 of Concat IP
+- Connect dout of Concat IP to IRQ_F2P of Zynq7 Processing System 
+- Create HDL Wrapper and go through the process of generating Bitstream and exporting Hardware
+- Open Vitis
+- Create Platform project using previously exported Hardware
+- Create Application Project
+- Add src files (Add all files in Vitis_src folder)
+- Build and run
+
+- To run performance_test.py, need install drivers from TotalPhase (https://www.totalphase.com/products/usb-drivers/)
