@@ -1,17 +1,24 @@
 #include "canbus.h"
+#include "crypto_system.h"
+#include "circular_buffer.h"
 
 /************************** Variable Definitions *****************************/
 
 static XCanPs CanInstance;    /* Instance of the Can driver */
-static INTC IntcInstance; /* Instance of the Interrupt Controller driver */
+extern XScuGic IntcInstance; /* Instance of the Interrupt Controller driver */
 
 /*
  * Buffers to hold frames to send and receive. These are declared as global so
  * that they are not on the stack.
  * These buffers need to be 32-bit aligned
  */
-static __attribute__((aligned(32))) u32 TxFrame[XCANPS_MAX_FRAME_SIZE_IN_WORDS];
-static __attribute__((aligned(32))) u32 RxFrame[XCANPS_MAX_FRAME_SIZE_IN_WORDS];
+static __attribute__((aligned(32))) u32 TxFrame[4];
+static __attribute__((aligned(32))) u32 RxFrame[4];
+
+volatile struct circular_buffer to_OBC_c_buffer;
+volatile struct circular_buffer to_GS_c_buffer;
+
+struct crypto_buffer* tx_buffer;
 
 /*
  * Shared variables used to test the callbacks.
@@ -20,13 +27,19 @@ volatile static int LoopbackError;	/* Asynchronous error occurred */
 volatile static int RecvDone;		/* Received a frame */
 volatile static int SendDone;		/* Frame was sent successfully */
 
+void SendHandler(void *CallBackRef);
+void RecvHandler(void *CallBackRef);
+void ErrorHandler(void *CallBackRef, u32 ErrorMask);
+void EventHandler(void *CallBackRef, u32 Mask);
 
-int InitCANBus() {
-	INTC *IntcInstPtr = &IntcInstance;
-	XCanPs *CanInstPtr = &CanInstance;
-	u16 CanDeviceId = CAN_DEVICE_ID;
-	u16 CanIntrId = CAN_INTR_VEC_ID;
+int init_CANBus() {
 	int Status;
+
+	init_circular_buffer(&to_OBC_c_buffer);
+	init_circular_buffer(&to_GS_c_buffer);
+
+	XScuGic *IntcInstPtr = &IntcInstance;
+	XCanPs *CanInstPtr = &CanInstance;
 	XGpioPs Gpio;
 	XGpioPs_Config * GpioCfg;
 
@@ -44,7 +57,6 @@ int InitCANBus() {
 	/*
 	* Setup GPIO9 to low (CAN_STB/SP_MIO9)
 	*/
-	xil_printf("Set GPIO pin to low\r\n");
 	XGpioPs_SetDirectionPin(&Gpio, 9, 1);
 	XGpioPs_SetOutputEnablePin(&Gpio, 9, 1);
 	XGpioPs_WritePin(&Gpio, 9, 0);
@@ -54,7 +66,7 @@ int InitCANBus() {
 	/*
 	 * Initialize the Can device.
 	 */
-	ConfigPtr = XCanPs_LookupConfig(CanDeviceId);
+	ConfigPtr = XCanPs_LookupConfig(XPAR_XCANPS_0_DEVICE_ID);
 	if (ConfigPtr == NULL) {
 		return XST_FAILURE;
 	}
@@ -72,9 +84,20 @@ int InitCANBus() {
 	}
 
 	/*
-	 * Configure CAN device.
+	 * Enter Configuration Mode if the device is not currently in
+	 * Configuration Mode.
 	 */
-	Config(CanInstPtr);
+	XCanPs_EnterMode(CanInstPtr, XCANPS_MODE_CONFIG);
+	while(XCanPs_GetMode(CanInstPtr) != XCANPS_MODE_CONFIG);
+
+	/*
+	 * Setup Baud Rate Prescaler Register (BRPR) and
+	 * Bit Timing Register (BTR).
+	 */
+	XCanPs_SetBaudRatePrescaler(CanInstPtr, TEST_BRPR_BAUD_PRESCALAR);
+	XCanPs_SetBitTiming(CanInstPtr, TEST_BTR_SYNCJUMPWIDTH,
+					TEST_BTR_SECOND_TIMESEGMENT,
+					TEST_BTR_FIRST_TIMESEGMENT);
 	/*
 	 * Set interrupt handlers.
 	 */
@@ -95,11 +118,21 @@ int InitCANBus() {
 	LoopbackError = FALSE;
 
 	/*
-	 * Connect to the interrupt controller.
+	 * Connect the device driver handler that will be called when an
+	 * interrupt for the device occurs, the handler defined above performs
+	 * the specific interrupt processing for the device.
 	 */
-	Status =  SetupInterruptSystem(IntcInstPtr,
-					CanInstPtr,
-					CanIntrId);
+	Status = XScuGic_Connect(IntcInstPtr, XPAR_XCANPS_0_INTR,
+				(Xil_InterruptHandler)XCanPs_IntrHandler,
+				(void *)CanInstPtr);
+	if (Status != XST_SUCCESS) {
+		return Status;
+	}
+
+	/*
+	 * Enable the interrupt for the CAN device.
+	 */
+	XScuGic_Enable(IntcInstPtr, XPAR_XCANPS_0_INTR);
 	if (Status != XST_SUCCESS) {
 		return XST_FAILURE;
 	}
@@ -110,119 +143,156 @@ int InitCANBus() {
 	XCanPs_IntrEnable(CanInstPtr, XCANPS_IXR_ALL);
 
 	/*
-	 * Enter Loop Back Mode.
+	 * Enter Normal Mode.
 	 */
 	XCanPs_EnterMode(CanInstPtr, XCANPS_MODE_NORMAL);
 	while(XCanPs_GetMode(CanInstPtr) != XCANPS_MODE_NORMAL);
-	xil_printf("Set Up done\r\n");
-
 
 	return XST_SUCCESS;
 }
 
-int testCANBus() {
-	XCanPs *CanInstPtr = &CanInstance;
-
-	xil_printf("Sending frame\r\n");
-	SendFrame(CanInstPtr);
-
-	/*
-	 * Wait here until both sending and reception have been completed.
-	 */
-	while ((SendDone != TRUE) || (RecvDone != TRUE));
-
-	/*
-	 * Check for errors found in the callbacks.
-	 */
-	if (LoopbackError == TRUE) {
-		return XST_LOOPBACK_ERROR;
-	}
-
-	return XST_SUCCESS;
-}
-
-/*****************************************************************************/
-/**
-*
-* Send a CAN frame.
-*
-* @param	InstancePtr is a pointer to the driver instance.
-*
-* @return	None.
-*
-* @note		None.
-*
-******************************************************************************/
-void SendFrame(XCanPs *InstancePtr)
-{
-	u8 *FramePtr;
-	int Index;
+void send_crypto_buffer(struct crypto_buffer* crypto_buffer_to_send) {
+	tx_buffer = crypto_buffer_to_send;
+	int data_len;
 	int Status;
+	u8* frame_data;
+	if (tx_buffer->state == SEND_PAYLOAD_ONLY) {
+		if (tx_buffer->remaining_bytes == 0) {
+			return;
+		}
+		if (tx_buffer->remaining_bytes >= 8) {
+			data_len = 8;
+		} else {
+			data_len = tx_buffer->remaining_bytes;
+		}
+		TxFrame[0] = (u32)XCanPs_CreateIdValue((u32) CIM_TO_OBC, 0, 0, 0, 0);
+		TxFrame[1] = (u32)XCanPs_CreateDlcValue((u32) data_len);
 
-	/*
-	 * Create correct values for Identifier and Data Length Code Register.
-	 */
-	TxFrame[0] = (u32)XCanPs_CreateIdValue((u32)TEST_MESSAGE_ID, 0, 0, 0, 0);
-	TxFrame[1] = (u32)XCanPs_CreateDlcValue((u32)FRAME_DATA_LENGTH);
+		frame_data = (u8*)&TxFrame[2];
+		for (int i = 0; i < data_len; i++) {
+			int index = tx_buffer->block_number * 16 + tx_buffer->block_offset;
+			frame_data[i] = tx_buffer->payload_tag[index];
+			tx_buffer->block_offset--;
+			tx_buffer->remaining_bytes--;
+			if (tx_buffer->block_offset < 0) {
+				tx_buffer->block_number++;
+				tx_buffer->block_offset = 15;
+			}
+		}
 
-	/*
-	 * Now fill in the data field with known values so we can verify them
-	 * on receive.
-	 */
-	FramePtr = (u8 *)(&TxFrame[2]);
-	for (Index = 0; Index < FRAME_DATA_LENGTH; Index++) {
-		*FramePtr++ = (u8)Index;
-	}
-
-	/*
-	 * Now wait until the TX FIFO is not full and send the frame.
-	 */
-	while (XCanPs_IsTxFifoFull(InstancePtr) == TRUE);
-
-	Status = XCanPs_Send(InstancePtr, TxFrame);
-	if (Status != XST_SUCCESS) {
-		xil_printf("The frame could not be sent successfully.\r\n");
 		/*
-		 * The frame could not be sent successfully.
+		 * Now wait until the TX FIFO is not full and send the frame.
 		 */
-		LoopbackError = TRUE;
-		SendDone = TRUE;
-		RecvDone = TRUE;
+		while (XCanPs_IsTxFifoFull(&CanInstance) == TRUE);
+		Status = XCanPs_Send(&CanInstance, TxFrame);
+		if (Status != XST_SUCCESS) {
+			xil_printf("The frame could not be sent successfully.\r\n");
+		}
+	} else {
+		switch (tx_buffer->state) {
+			case SEND_CRYPTO_HEADER:
+				if (tx_buffer->block_offset - 3 >= 8) {
+					data_len = 8;
+				} else {
+					data_len = tx_buffer->block_offset - 3;
+				}
+
+				TxFrame[0] = (u32)XCanPs_CreateIdValue((u32) CIM_TO_GS, 0, 0, 0, 0);
+				TxFrame[1] = (u32)XCanPs_CreateDlcValue((u32) data_len);
+
+				frame_data = (u8*)&TxFrame[2];
+
+				for (int i = 0; i < data_len; i++) {
+					frame_data[i] = tx_buffer->crypto_header[tx_buffer->block_offset];
+					tx_buffer->block_offset--;
+				}
+
+				if (tx_buffer->block_offset < 4) {
+					tx_buffer->block_offset = 15;
+					tx_buffer->state = SEND_PAYLOAD_WITH_TAG;
+				}
+
+				/*
+				 * Now wait until the TX FIFO is not full and send the frame.
+				 */
+				while (XCanPs_IsTxFifoFull(&CanInstance) == TRUE);
+				Status = XCanPs_Send(&CanInstance, TxFrame);
+				if (Status != XST_SUCCESS) {
+					xil_printf("The frame could not be sent successfully.\r\n");
+				}
+				break;
+
+			case SEND_PAYLOAD_WITH_TAG:
+				if (tx_buffer->remaining_bytes >= 8) {
+					data_len = 8;
+				} else {
+					data_len = tx_buffer->remaining_bytes;
+				}
+				TxFrame[0] = (u32)XCanPs_CreateIdValue((u32) CIM_TO_GS, 0, 0, 0, 0);
+				TxFrame[1] = (u32)XCanPs_CreateDlcValue((u32) data_len);
+
+				frame_data = (u8*)&TxFrame[2];
+
+				for (int i = 0; i < data_len; i++) {
+					int index = tx_buffer->block_number * 16 + tx_buffer->block_offset;
+					frame_data[i] = tx_buffer->payload_tag[index];
+					tx_buffer->block_offset--;
+					tx_buffer->remaining_bytes--;
+					if (tx_buffer->block_offset < 0) {
+						tx_buffer->block_number++;
+						tx_buffer->block_offset = 15;
+					}
+				}
+
+				if (tx_buffer->remaining_bytes == 0) {
+					tx_buffer->block_number++;
+					tx_buffer->block_offset = 15;
+					tx_buffer->state = SEND_TAG;
+				}
+
+				/*
+				 * Now wait until the TX FIFO is not full and send the frame.
+				 */
+				while (XCanPs_IsTxFifoFull(&CanInstance) == TRUE);
+				Status = XCanPs_Send(&CanInstance, TxFrame);
+				if (Status != XST_SUCCESS) {
+					xil_printf("The frame could not be sent successfully.\r\n");
+				}
+				break;
+
+			case SEND_TAG:
+				if (tx_buffer->block_offset < 0) {
+					return;
+				}
+
+				if (tx_buffer->block_offset >= 8) {
+					data_len = 8;
+				} else {
+					data_len = tx_buffer->block_offset;
+				}
+
+				TxFrame[0] = (u32)XCanPs_CreateIdValue((u32) CIM_TO_GS, 0, 0, 0, 0);
+				TxFrame[1] = (u32)XCanPs_CreateDlcValue((u32) data_len);
+
+				frame_data = (u8*)&TxFrame[2];
+
+				for (int i = 0; i < data_len; i++) {
+					int index = tx_buffer->block_number * 16 + tx_buffer->block_offset;
+					frame_data[i] = tx_buffer->payload_tag[index];
+					tx_buffer->block_offset--;
+				}
+
+				/*
+				 * Now wait until the TX FIFO is not full and send the frame.
+				 */
+				while (XCanPs_IsTxFifoFull(&CanInstance) == TRUE);
+				Status = XCanPs_Send(&CanInstance, TxFrame);
+				if (Status != XST_SUCCESS) {
+					xil_printf("The frame could not be sent successfully.\r\n");
+				}
+				break;
+		}
 	}
-}
-
-/*****************************************************************************/
-/**
-*
-* This function configures CAN device. Baud Rate Prescaler Register (BRPR) and
-* Bit Timing Register (BTR) are set in this function.
-*
-* @param	InstancePtr is a pointer to the driver instance.
-*
-* @return	None.
-*
-* @note		If the CAN device is not working correctly, this function may
-*		enter an infinite loop and will never return to the caller.
-*
-******************************************************************************/
-void Config(XCanPs *InstancePtr)
-{
-	/*
-	 * Enter Configuration Mode if the device is not currently in
-	 * Configuration Mode.
-	 */
-	XCanPs_EnterMode(InstancePtr, XCANPS_MODE_CONFIG);
-	while(XCanPs_GetMode(InstancePtr) != XCANPS_MODE_CONFIG);
-
-	/*
-	 * Setup Baud Rate Prescaler Register (BRPR) and
-	 * Bit Timing Register (BTR).
-	 */
-	XCanPs_SetBaudRatePrescaler(InstancePtr, TEST_BRPR_BAUD_PRESCALAR);
-	XCanPs_SetBitTiming(InstancePtr, TEST_BTR_SYNCJUMPWIDTH,
-					TEST_BTR_SECOND_TIMESEGMENT,
-					TEST_BTR_FIRST_TIMESEGMENT);
-
 }
 
 /*****************************************************************************/
@@ -245,7 +315,146 @@ void SendHandler(void *CallBackRef)
 	 * The frame was sent successfully. Notify the task context.
 	 */
 	SendDone = TRUE;
-	xil_printf("Send handler called and frame successfully sent\r\n");
+//	xil_printf("Send handler called and frame successfully sent\r\n");
+	int Status;
+	int data_len;
+	u8* frame_data;
+	if (tx_buffer->state == SEND_PAYLOAD_ONLY) {
+		if (tx_buffer->remaining_bytes == 0) {
+			return;
+		}
+		if (tx_buffer->remaining_bytes >= 8) {
+			data_len = 8;
+		} else {
+			data_len = tx_buffer->remaining_bytes;
+		}
+		TxFrame[0] = (u32)XCanPs_CreateIdValue((u32) CIM_TO_OBC, 0, 0, 0, 0);
+		TxFrame[1] = (u32)XCanPs_CreateDlcValue((u32) data_len);
+
+		frame_data = (u8*)&TxFrame[2];
+		for (int i = 0; i < data_len; i++) {
+			int index = tx_buffer->block_number * 16 + tx_buffer->block_offset;
+			frame_data[i] = tx_buffer->payload_tag[index];
+			tx_buffer->block_offset--;
+			tx_buffer->remaining_bytes--;
+			if (tx_buffer->block_offset < 0) {
+				tx_buffer->block_number++;
+				tx_buffer->block_offset = 15;
+			}
+		}
+		/*
+		 * Now wait until the TX FIFO is not full and send the frame.
+		 */
+		while (XCanPs_IsTxFifoFull(&CanInstance) == TRUE);
+		Status = XCanPs_Send(&CanInstance, TxFrame);
+		if (Status != XST_SUCCESS) {
+			xil_printf("The frame could not be sent successfully.\r\n");
+		}
+	} else {
+		switch (tx_buffer->state) {
+			case SEND_CRYPTO_HEADER:
+				if (tx_buffer->block_offset - 3 >= 8) {
+					data_len = 8;
+				} else {
+					data_len = tx_buffer->block_offset - 3;
+				}
+
+				TxFrame[0] = (u32)XCanPs_CreateIdValue((u32) CIM_TO_GS, 0, 0, 0, 0);
+				TxFrame[1] = (u32)XCanPs_CreateDlcValue((u32) data_len);
+
+				frame_data = (u8*)&TxFrame[2];
+
+				for (int i = 0; i < data_len; i++) {
+					frame_data[i] = tx_buffer->crypto_header[tx_buffer->block_offset];
+					tx_buffer->block_offset--;
+				}
+
+				if (tx_buffer->block_offset < 4) {
+					tx_buffer->block_offset = 15;
+					tx_buffer->state = SEND_PAYLOAD_WITH_TAG;
+				}
+
+				/*
+				 * Now wait until the TX FIFO is not full and send the frame.
+				 */
+				while (XCanPs_IsTxFifoFull(&CanInstance) == TRUE);
+				Status = XCanPs_Send(&CanInstance, TxFrame);
+				if (Status != XST_SUCCESS) {
+					xil_printf("The frame could not be sent successfully.\r\n");
+				}
+				break;
+
+			case SEND_PAYLOAD_WITH_TAG:
+				if (tx_buffer->remaining_bytes >= 8) {
+					data_len = 8;
+				} else {
+					data_len = tx_buffer->remaining_bytes;
+				}
+				TxFrame[0] = (u32)XCanPs_CreateIdValue((u32) CIM_TO_GS, 0, 0, 0, 0);
+				TxFrame[1] = (u32)XCanPs_CreateDlcValue((u32) data_len);
+
+				frame_data = (u8*)&TxFrame[2];
+
+				for (int i = 0; i < data_len; i++) {
+					int index = tx_buffer->block_number * 16 + tx_buffer->block_offset;
+					frame_data[i] = tx_buffer->payload_tag[index];
+					tx_buffer->block_offset--;
+					tx_buffer->remaining_bytes--;
+					if (tx_buffer->block_offset < 0) {
+						tx_buffer->block_number++;
+						tx_buffer->block_offset = 15;
+					}
+				}
+
+				if (tx_buffer->remaining_bytes <= 0) {
+					tx_buffer->block_number++;
+					tx_buffer->block_offset = 15;
+					tx_buffer->state = SEND_TAG;
+				}
+
+				/*
+				 * Now wait until the TX FIFO is not full and send the frame.
+				 */
+				while (XCanPs_IsTxFifoFull(&CanInstance) == TRUE);
+				Status = XCanPs_Send(&CanInstance, TxFrame);
+				if (Status != XST_SUCCESS) {
+					xil_printf("The frame could not be sent successfully.\r\n");
+				}
+				break;
+
+			case SEND_TAG:
+				if (tx_buffer->block_offset < 0) {
+					tx_buffer->state = RECV_PAYLOAD;
+					return;
+				}
+				if (tx_buffer->block_offset >= 8) {
+					data_len = 8;
+				} else {
+					data_len = tx_buffer->block_offset + 1;
+				}
+
+				TxFrame[0] = (u32)XCanPs_CreateIdValue((u32) CIM_TO_GS, 0, 0, 0, 0);
+				TxFrame[1] = (u32)XCanPs_CreateDlcValue((u32) data_len);
+
+				frame_data = (u8*)&TxFrame[2];
+
+				for (int i = 0; i < data_len; i++) {
+					int index = tx_buffer->block_number * 16 + tx_buffer->block_offset;
+					frame_data[i] = tx_buffer->payload_tag[index];
+					tx_buffer->block_offset--;
+				}
+
+				/*
+				 * Now wait until the TX FIFO is not full and send the frame.
+				 */
+				while (XCanPs_IsTxFifoFull(&CanInstance) == TRUE);
+				Status = XCanPs_Send(&CanInstance, TxFrame);
+				if (Status != XST_SUCCESS) {
+					xil_printf("The frame could not be sent successfully.\r\n");
+				}
+				break;
+		}
+	}
 }
 
 /*****************************************************************************/
@@ -267,8 +476,6 @@ void RecvHandler(void *CallBackRef)
 {
 	XCanPs *CanPtr = (XCanPs *)CallBackRef;
 	int Status;
-	int Index;
-	u8 *FramePtr;
 
 	Status = XCanPs_Recv(CanPtr, RxFrame);
 	if (Status != XST_SUCCESS) {
@@ -276,37 +483,21 @@ void RecvHandler(void *CallBackRef)
 		RecvDone = TRUE;
 		return;
 	}
-	xil_printf("Receive handler called and frame successfully received\r\n");
+//	xil_printf("Receive handler called and frame successfully received\r\n");
 
-	/*
-	 * Verify Identifier and Data Length Code.
-	 */
-	if (RxFrame[0] != (u32)XCanPs_CreateIdValue((u32)TEST_MESSAGE_ID, 0, 0, 0, 0)) {
-		LoopbackError = TRUE;
-		RecvDone = TRUE;
-		return;
+
+	u32 message_id = RxFrame[0] >> 21;
+	u32 data_len = RxFrame[1] >> 28;
+	u8 *data = (u8*) &RxFrame[2];
+	if (message_id == GS_TO_CIM || message_id == 256) {
+		circular_buffer_insert(&to_OBC_c_buffer, data, data_len);
+	} else {
+		circular_buffer_insert(&to_GS_c_buffer, data, data_len);
 	}
-
-	if ((RxFrame[1] & ~XCANPS_DLCR_TIMESTAMP_MASK) != TxFrame[1]) {
-		LoopbackError = TRUE;
-		RecvDone = TRUE;
-		return;
-	}
-
-	/*
-	 * Verify the Data field contents.
-	 */
-	FramePtr = (u8 *)(&RxFrame[2]);
-	for (Index = 0; Index < FRAME_DATA_LENGTH; Index++) {
-		if (*FramePtr++ != (u8)Index) {
-			LoopbackError = TRUE;
-			break;
-		}
-	}
-
 	RecvDone = TRUE;
-
 }
+
+
 
 /*****************************************************************************/
 /**
@@ -406,7 +597,21 @@ void EventHandler(void *CallBackRef, u32 IntrMask)
 		 * the CAN device be reset and reconfigured.
 		 */
 		XCanPs_Reset(CanPtr);
-		Config(CanPtr);
+		/*
+		 * Enter Configuration Mode if the device is not currently in
+		 * Configuration Mode.
+		 */
+		XCanPs_EnterMode(CanPtr, XCANPS_MODE_CONFIG);
+		while(XCanPs_GetMode(CanPtr) != XCANPS_MODE_CONFIG);
+
+		/*
+		 * Setup Baud Rate Prescaler Register (BRPR) and
+		 * Bit Timing Register (BTR).
+		 */
+		XCanPs_SetBaudRatePrescaler(CanPtr, TEST_BRPR_BAUD_PRESCALAR);
+		XCanPs_SetBitTiming(CanPtr, TEST_BTR_SYNCJUMPWIDTH,
+						TEST_BTR_SECOND_TIMESEGMENT,
+						TEST_BTR_FIRST_TIMESEGMENT);
 		return;
 	}
 
@@ -455,131 +660,4 @@ void EventHandler(void *CallBackRef, u32 IntrMask)
 		 * should be put here.
 		 */
 	}
-}
-
-/*****************************************************************************/
-/**
-*
-* This function sets up the interrupt system so interrupts can occur for the
-* CAN. This function is application-specific since the actual system may or
-* may not have an interrupt controller. The CAN could be directly connected
-* to a processor without an interrupt controller. The user should modify this
-* function to fit the application.
-*
-* @param	IntcInstancePtr is a pointer to the instance of the ScuGic.
-* @param	CanInstancePtr contains a pointer to the instance of the CAN
-*		which is going to be connected to the interrupt
-*		controller.
-* @param	CanIntrId is the interrupt Id and is typically
-*		XPAR_<CANPS_instance>_INTR value from xparameters.h.
-*
-* @return	XST_SUCCESS if successful, otherwise XST_FAILURE.
-*
-* @note		None.
-*
-****************************************************************************/
-int SetupInterruptSystem(INTC *IntcInstancePtr,
-				XCanPs *CanInstancePtr,
-				u16 CanIntrId)
-{
-	int Status;
-#ifdef XPAR_INTC_0_DEVICE_ID
-#ifndef TESTAPP_GEN
-	/* Initialize the interrupt controller and connect the ISRs */
-	Status = XIntc_Initialize(IntcInstancePtr, INTC_DEVICE_ID);
-	if (Status != XST_SUCCESS)
-	{
-
-		xil_printf("Failed init intc\r\n");
-		return XST_FAILURE;
-	}
-#endif
-	/*
-	 * Connect the driver interrupt handler
-	 */
-	Status = XIntc_Connect(IntcInstancePtr, CanIntrId,
-							(XInterruptHandler)XCanPs_IntrHandler, CanInstancePtr);
-	if (Status != XST_SUCCESS)
-	{
-
-		xil_printf("Failed connect intc\r\n");
-		return XST_FAILURE;
-	}
-#ifndef TESTAPP_GEN
-	/*
-	 * Start the interrupt controller such that interrupts are enabled for
-	 * all devices that cause interrupts.
-	 */
-	Status = XIntc_Start(IntcInstancePtr, XIN_REAL_MODE);
-	if (Status != XST_SUCCESS)
-	{
-		return XST_FAILURE;
-	}
-#endif
-
-	/*
-	 * Enable the interrupt for the CAN device.
-	 */
-	XIntc_Enable(IntcInstancePtr, CanIntrId);
-#ifndef TESTAPP_GEN
-	Xil_ExceptionInit();
-	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_INT,
-				(Xil_ExceptionHandler)XIntc_InterruptHandler,
-				(void *)IntcInstancePtr);
-#endif
-#else
-#ifndef TESTAPP_GEN
-	XScuGic_Config *IntcConfig; /* Instance of the interrupt controller */
-
-	Xil_ExceptionInit();
-
-	/*
-	 * Initialize the interrupt controller driver so that it is ready to
-	 * use.
-	 */
-	IntcConfig = XScuGic_LookupConfig(INTC_DEVICE_ID);
-	if (NULL == IntcConfig) {
-		return XST_FAILURE;
-	}
-
-	Status = XScuGic_CfgInitialize(IntcInstancePtr, IntcConfig,
-					IntcConfig->CpuBaseAddress);
-	if (Status != XST_SUCCESS) {
-		return XST_FAILURE;
-	}
-
-
-	/*
-	 * Connect the interrupt controller interrupt handler to the hardware
-	 * interrupt handling logic in the processor.
-	 */
-	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_IRQ_INT,
-				(Xil_ExceptionHandler)XScuGic_InterruptHandler,
-				IntcInstancePtr);
-#endif
-
-	/*
-	 * Connect the device driver handler that will be called when an
-	 * interrupt for the device occurs, the handler defined above performs
-	 * the specific interrupt processing for the device.
-	 */
-	Status = XScuGic_Connect(IntcInstancePtr, CanIntrId,
-				(Xil_InterruptHandler)XCanPs_IntrHandler,
-				(void *)CanInstancePtr);
-	if (Status != XST_SUCCESS) {
-		return Status;
-	}
-
-	/*
-	 * Enable the interrupt for the CAN device.
-	 */
-	XScuGic_Enable(IntcInstancePtr, CanIntrId);
-#endif
-#ifndef TESTAPP_GEN
-	/*
-	 * Enable interrupts in the Processor.
-	 */
-	Xil_ExceptionEnable();
-#endif
-	return XST_SUCCESS;
 }

@@ -7,7 +7,7 @@
 
 XAxiDma AxiDma;		/* Instance of the XAxiDma */
 
-INTC Intc;	/* Instance of the Interrupt Controller */
+extern XScuGic IntcInstance;	/* Instance of the Interrupt Controller */
 
 /*
  * Flags interrupt handlers use to notify the application context the events.
@@ -16,14 +16,17 @@ volatile u32 TxDone;
 volatile u32 RxDone;
 volatile u32 Error;
 
-int InitDMA()
+void TxIntrHandler(void *Callback);
+void RxIntrHandler(void *Callback);
+
+int init_DMA()
 {
 	int Status;
-	XAxiDma_Config *Config;
-	Config = XAxiDma_LookupConfig(DMA_DEV_ID);
-	if (!Config) {
-		xil_printf("No config found for %d\r\n", DMA_DEV_ID);
 
+	XAxiDma_Config *Config;
+	Config = XAxiDma_LookupConfig(XPAR_AXIDMA_0_DEVICE_ID);
+	if (!Config) {
+		xil_printf("No config found for %d\r\n", XPAR_AXIDMA_0_DEVICE_ID);
 		return XST_FAILURE;
 	}
 
@@ -48,13 +51,30 @@ int InitDMA()
 	XAxiDma_IntrDisable(&AxiDma, XAXIDMA_IRQ_ALL_MASK,
 				XAXIDMA_DEVICE_TO_DMA);
 
-	/* Set up Interrupt system  */
-	Status = SetupIntrSystem(&Intc, &AxiDma, TX_INTR_ID, RX_INTR_ID);
-	if (Status != XST_SUCCESS) {
+	XScuGic_SetPriorityTriggerType(&IntcInstance, XPAR_FABRIC_AXIDMA_0_MM2S_INTROUT_VEC_ID, 0xA0, 0x3);
 
-		xil_printf("Failed intr setup\r\n");
-		return XST_FAILURE;
+	XScuGic_SetPriorityTriggerType(&IntcInstance, XPAR_FABRIC_AXIDMA_0_S2MM_INTROUT_VEC_ID, 0xA0, 0x3);
+	/*
+	 * Connect the device driver handler that will be called when an
+	 * interrupt for the device occurs, the handler defined above performs
+	 * the specific interrupt processing for the device.
+	 */
+	Status = XScuGic_Connect(&IntcInstance, XPAR_FABRIC_AXIDMA_0_MM2S_INTROUT_VEC_ID,
+				(Xil_InterruptHandler)TxIntrHandler,
+				&AxiDma);
+	if (Status != XST_SUCCESS) {
+		return Status;
 	}
+
+	Status = XScuGic_Connect(&IntcInstance, XPAR_FABRIC_AXIDMA_0_S2MM_INTROUT_VEC_ID,
+				(Xil_InterruptHandler)RxIntrHandler,
+				&AxiDma);
+	if (Status != XST_SUCCESS) {
+		return Status;
+	}
+
+	XScuGic_Enable(&IntcInstance, XPAR_FABRIC_AXIDMA_0_MM2S_INTROUT_VEC_ID);
+	XScuGic_Enable(&IntcInstance, XPAR_FABRIC_AXIDMA_0_S2MM_INTROUT_VEC_ID);
 
 	/* Enable all interrupts */
 	XAxiDma_IntrEnable(&AxiDma, XAXIDMA_IRQ_ALL_MASK,
@@ -225,91 +245,11 @@ void RxIntrHandler(void *Callback)
 }
 
 /*****************************************************************************/
-/*
-*
-* This function setups the interrupt system so interrupts can occur for the
-* DMA, it assumes INTC component exists in the hardware system.
-*
-* @param	IntcInstancePtr is a pointer to the instance of the INTC.
-* @param	AxiDmaPtr is a pointer to the instance of the DMA engine
-* @param	TxIntrId is the TX channel Interrupt ID.
-* @param	RxIntrId is the RX channel Interrupt ID.
-*
-* @return
-*		- XST_SUCCESS if successful,
-*		- XST_FAILURE.if not successful
-*
-* @note		None.
-*
-******************************************************************************/
-int SetupIntrSystem(INTC * IntcInstancePtr,
-			   XAxiDma * AxiDmaPtr, u16 TxIntrId, u16 RxIntrId)
-{
-	int Status;
-
-	XScuGic_Config *IntcConfig;
-
-
-	/*
-	 * Initialize the interrupt controller driver so that it is ready to
-	 * use.
-	 */
-	IntcConfig = XScuGic_LookupConfig(INTC_DEVICE_ID);
-	if (NULL == IntcConfig) {
-		return XST_FAILURE;
-	}
-
-	Status = XScuGic_CfgInitialize(IntcInstancePtr, IntcConfig,
-					IntcConfig->CpuBaseAddress);
-	if (Status != XST_SUCCESS) {
-		return XST_FAILURE;
-	}
-
-
-	XScuGic_SetPriorityTriggerType(IntcInstancePtr, TxIntrId, 0xA0, 0x3);
-
-	XScuGic_SetPriorityTriggerType(IntcInstancePtr, RxIntrId, 0xA0, 0x3);
-	/*
-	 * Connect the device driver handler that will be called when an
-	 * interrupt for the device occurs, the handler defined above performs
-	 * the specific interrupt processing for the device.
-	 */
-	Status = XScuGic_Connect(IntcInstancePtr, TxIntrId,
-				(Xil_InterruptHandler)TxIntrHandler,
-				AxiDmaPtr);
-	if (Status != XST_SUCCESS) {
-		return Status;
-	}
-
-	Status = XScuGic_Connect(IntcInstancePtr, RxIntrId,
-				(Xil_InterruptHandler)RxIntrHandler,
-				AxiDmaPtr);
-	if (Status != XST_SUCCESS) {
-		return Status;
-	}
-
-	XScuGic_Enable(IntcInstancePtr, TxIntrId);
-	XScuGic_Enable(IntcInstancePtr, RxIntrId);
-
-
-	/* Enable interrupts from the hardware */
-
-	Xil_ExceptionInit();
-	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_INT,
-			(Xil_ExceptionHandler)INTC_HANDLER,
-			(void *)IntcInstancePtr);
-
-	Xil_ExceptionEnable();
-
-	return XST_SUCCESS;
-}
-
-/*****************************************************************************/
 /**
 *
 * This function disables the interrupts for DMA engine.
 *
-* @param	IntcInstancePtr is the pointer to the INTC component instance
+* @param	IntcInstancePtr is the pointer to the XScuGic component instance
 * @param	TxIntrId is interrupt ID associated w/ DMA TX channel
 * @param	RxIntrId is interrupt ID associated w/ DMA RX channel
 *
@@ -318,7 +258,7 @@ int SetupIntrSystem(INTC * IntcInstancePtr,
 * @note		None.
 *
 ******************************************************************************/
-void DisableIntrSystem(INTC * IntcInstancePtr,
+void DisableIntrSystem(XScuGic * IntcInstancePtr,
 					u16 TxIntrId, u16 RxIntrId)
 {
 	XScuGic_Disconnect(IntcInstancePtr, TxIntrId);
